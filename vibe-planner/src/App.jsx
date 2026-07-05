@@ -17,7 +17,8 @@ import {
 // ==========================================================================
 // Mock Initial Data
 // ==========================================================================
-
+const INITIAL_COURSES = [];
+const INITIAL_ASSIGNMENTS = [];
 
 // Custom colors for new courses
 const COURSE_COLORS = ['#8b5cf6', '#06b6d4', '#10b981', '#f43f5e', '#f59e0b', '#3b82f6', '#ec4899'];
@@ -26,7 +27,9 @@ function App() {
   // ==========================================================================
   // States
   // ==========================================================================
-  
+  const [courses, setCourses] = useState(INITIAL_COURSES);
+  const [assignments, setAssignments] = useState(INITIAL_ASSIGNMENTS);
+
   // Date states (Default active is July 2026)
   const [currentDate, setCurrentDate] = useState(new Date(2026, 6, 5)); // July 5, 2026
   const [selectedDate, setSelectedDate] = useState(new Date(2026, 6, 8)); // Focused on July 8, 2026 (Math assignment due)
@@ -48,6 +51,128 @@ function App() {
   const [newPastGradeInput, setNewPastGradeInput] = useState('');
   const [newPastGradeType, setNewPastGradeType] = useState('Quiz');
   const [newPastGradeLabel, setNewPastGradeLabel] = useState('1');
+  const [completingAssignmentId, setCompletingAssignmentId] = useState(null);
+  const [assignmentCompletionScore, setAssignmentCompletionScore] = useState('');
+
+  // Trigger dynamic recommendation refresh from backend recommender
+  const refreshCourseRecommendation = async (courseId, nextCourses, nextAssignments) => {
+    try {
+      const targetCourse = nextCourses.find(c => c.id === courseId);
+      if (!targetCourse) return;
+
+      const courseAssignments = nextAssignments.filter(a => a.courseId === courseId);
+      
+      const studentDataPayload = {
+        current_date: targetCourse.startDate || '2026-07-05',
+        courses: [
+          {
+            code: targetCourse.code,
+            name: targetCourse.name,
+            available_hours: targetCourse.availableHours || 4,
+            previous_study_hours: targetCourse.hoursSpent || 0,
+            previous_exam_scores: [
+              ...(targetCourse.prevExamScore !== undefined ? [targetCourse.prevExamScore] : []),
+              ...(targetCourse.pastGrades || []).map(g => g.score)
+            ],
+            topics: targetCourse.topics || ['Syllabus Milestones'],
+            exams: courseAssignments.filter(a => a.type === 'exam').map(e => ({
+              name: e.title,
+              date: e.dueDate,
+              topics: e.material ? [e.material] : []
+            })),
+            assignments: courseAssignments.filter(a => a.type === 'assignment').map(a => ({
+              name: a.title,
+              due_date: a.dueDate
+            }))
+          }
+        ]
+      };
+
+      console.log(`PAYLOAD: POST /api/courses/recommend`, studentDataPayload);
+      const res = await fetch('/api/courses/recommend', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(studentDataPayload)
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        console.log("SUCCESS: Dynamic recommendations update:", data);
+        const recList = data.recommendations && data.recommendations.courses;
+        let courseRec = null;
+        if (Array.isArray(recList)) {
+          courseRec = recList.find(r => 
+            r.course_code && (r.course_code.toUpperCase().replace(/[- ]/g, '') === targetCourse.code.toUpperCase().replace(/[- ]/g, ''))
+          );
+        }
+        if (!courseRec && recList && recList.length > 0) {
+          courseRec = recList[0];
+        }
+        if (!courseRec && data.recommendations) {
+          courseRec = data.recommendations;
+        }
+
+        if (courseRec) {
+          setCourses(prev =>
+            prev.map(c =>
+              c.id === courseId
+                ? {
+                    ...c,
+                    recommendation: {
+                      recommended_hours: courseRec.recommended_hours !== undefined ? courseRec.recommended_hours : 'N/A',
+                      recommended_topics: courseRec.recommended_topics || [],
+                      reasoning: courseRec.reasoning || 'No specific backend recommendations.'
+                    }
+                  }
+                : c
+            )
+          );
+        }
+      }
+    } catch (e) {
+      console.log("Dynamic recommendation skipped: backend connection offline.");
+    }
+  };
+
+  // Complete an assignment and convert it into a past grade entry
+  const handleConfirmCompleteAssignment = async (courseId, assignment) => {
+    const val = parseFloat(assignmentCompletionScore);
+    if (isNaN(val) || val < 0 || val > 100) return;
+
+    const nextAssignments = assignments.filter(a => a.id !== assignment.id);
+
+    let gradeType = 'Quiz';
+    if (assignment.type === 'exam') {
+      gradeType = 'Exam';
+    } else if (assignment.type === 'project') {
+      gradeType = 'Project';
+    }
+    const fullName = `${gradeType}: ${assignment.title}`;
+    const newGradeObj = { name: fullName, score: val };
+
+    const nextCourses = courses.map(c =>
+      c.id === courseId
+        ? { ...c, pastGrades: [...(c.pastGrades || []), newGradeObj] }
+        : c
+    );
+
+    setAssignments(nextAssignments);
+    setCourses(nextCourses);
+
+    refreshCourseRecommendation(courseId, nextCourses, nextAssignments);
+
+    try {
+      console.log(`PAYLOAD: POST /api/courses/${courseId}/past-grades`, newGradeObj);
+      await fetch(`/api/courses/${courseId}/past-grades`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newGradeObj)
+      });
+    } catch(e) {}
+
+    setCompletingAssignmentId(null);
+    setAssignmentCompletionScore('');
+  };
 
   // Trigger a mock update API endpoint when Current Grade average changes
   const updateCourseGrade = async (courseId, newGrade) => {
@@ -69,11 +194,16 @@ function App() {
     const amt = parseFloat(logHoursAmount);
     if (isNaN(amt) || amt <= 0) return;
     
-    setCourses(prevCourses => 
-      prevCourses.map(c => 
+    let nextCourses = [];
+    setCourses(prevCourses => {
+      nextCourses = prevCourses.map(c => 
         c.id === courseId ? { ...c, hoursSpent: c.hoursSpent + amt } : c
-      )
-    );
+      );
+      // Fire recommender update asynchronously with next state
+      refreshCourseRecommendation(courseId, nextCourses, assignments);
+      return nextCourses;
+    });
+
     setIsLogHoursOpen(false);
     setLogHoursAmount('1');
   };
@@ -92,7 +222,13 @@ function App() {
       material: newAssignmentMaterial
     };
     
-    setAssignments(prev => [...prev, newAssign]);
+    setAssignments(prev => {
+      const nextAssignments = [...prev, newAssign];
+      // Fire recommender update asynchronously with next state
+      refreshCourseRecommendation(courseId, courses, nextAssignments);
+      return nextAssignments;
+    });
+
     setIsAddAssignmentOpen(false);
     setNewAssignmentTitle('');
     setNewAssignmentMaterial('');
@@ -109,13 +245,17 @@ function App() {
     }
     const newGradeObj = { name: fullName, score: val };
 
-    setCourses(prev =>
-      prev.map(c =>
+    let nextCourses = [];
+    setCourses(prev => {
+      nextCourses = prev.map(c =>
         c.id === courseId
           ? { ...c, pastGrades: [...(c.pastGrades || []), newGradeObj] }
           : c
-      )
-    );
+      );
+      // Fire recommender update asynchronously with next state
+      refreshCourseRecommendation(courseId, nextCourses, assignments);
+      return nextCourses;
+    });
 
     // Sync past grade updates to backend database mock
     try {
@@ -187,12 +327,12 @@ function App() {
     }
     
     const totalHours = currentCourses.reduce((sum, c) => sum + c.hoursSpent, 0);
-    text += `- Study total is ${totalHours} hours. Configure VITE_OPENROUTER_API_KEY in .env to enable live Qwen 2.5 summary reports!`;
+    text += `- Study total is ${totalHours} hours. Configure VITE_OPENROUTER_API_KEY in .env to enable live GPT-4o-mini summary reports!`;
 
     return text;
   };
 
-  // Fetch analysis from Qwen on OpenRouter
+  // Fetch analysis from GPT-4o-mini on OpenRouter
   const fetchQwenAnalysis = async (currentCourses, currentAssignments) => {
     const apiKey = import.meta.env.VITE_OPENROUTER_API_KEY;
     const isMock = !apiKey || apiKey === 'YOUR_OPENROUTER_API_KEY' || apiKey.trim() === '';
@@ -204,7 +344,7 @@ function App() {
     }
 
     setIsGenerating(true);
-    setLlmSummaryText('Querying Qwen 2.5 via OpenRouter for profile insights...');
+    setLlmSummaryText('Querying GPT-4o-mini via OpenRouter for profile insights...');
 
     try {
       const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -216,7 +356,7 @@ function App() {
           "X-Title": "VibePlanner"
         },
         body: JSON.stringify({
-          model: "qwen/qwen-2.5-72b-instruct",
+          model: "openai/gpt-4o-mini",
           messages: [
             {
               role: "system",
@@ -225,7 +365,7 @@ function App() {
             {
               role: "user",
               content: `Here is my current academic profile:
-Courses: ${JSON.stringify(currentCourses.map(c => ({ code: c.code, name: c.name, progress: c.progress, hoursSpent: c.hoursSpent, availableHours: c.availableHours, syllabusUploaded: !!c.syllabusName, baselineExamScores: c.prevExamScores })))}
+Variables: ${JSON.stringify(currentCourses.map(c => ({ code: c.code, name: c.name, progress: c.progress, hoursSpent: c.hoursSpent, availableHours: c.availableHours, syllabusUploaded: !!c.syllabusName, baselineExamScores: c.prevExamScores })))}
 Upcoming Deadlines: ${JSON.stringify(currentAssignments.map(a => ({ title: a.title, dueDate: a.dueDate, type: a.type, material: a.material })))}
 `
             }
@@ -238,12 +378,11 @@ Upcoming Deadlines: ${JSON.stringify(currentAssignments.map(a => ({ title: a.tit
       }
 
       const data = await response.json();
-      const recommendation = data.recommendations.courses[0];
       const content = data.choices[0]?.message?.content || 'No insights returned.';
       startStreamingText(content);
     } catch (error) {
       console.error("OpenRouter Fetch Error:", error);
-      const fallbackText = `⚠️ Error fetching Qwen AI Insights: ${error.message}\n\n[Verify your OpenRouter API key in the .env file is correct and active]\n\n` + generateLocalAISummary(currentCourses, currentAssignments);
+      const fallbackText = `⚠️ Error fetching GPT-4o-mini AI Insights: ${error.message}\n\n[Verify your OpenRouter API key in the .env file is correct and active]\n\n` + generateLocalAISummary(currentCourses, currentAssignments);
       startStreamingText(fallbackText);
     } finally {
       setIsGenerating(false);
@@ -316,29 +455,8 @@ Upcoming Deadlines: ${JSON.stringify(currentAssignments.map(a => ({ title: a.tit
 
   // Generate on load
   useEffect(() => {
-    const fetchProfileFromBackend = async () => {
-      try {
-        const resCourses = await fetch('/api/courses');
-        if (resCourses.ok) {
-          const coursesData = await resCourses.json();
-          setCourses(coursesData);
-        }
-        
-        const resAssignments = await fetch('/api/assignments');
-        if (resAssignments.ok) {
-          const assignmentsData = await resAssignments.json();
-          setAssignments(assignmentsData);
-        }
-      } catch (e) {
-        console.log("Simulating profile fetch: No backend API active. Falling back to local placeholder data.");
-      }
-    };
-
-    fetchProfileFromBackend();
-
     return () => {
       if (streamingIntervalRef.current) clearInterval(streamingIntervalRef.current);
-
     };
   }, []);
 
@@ -461,9 +579,15 @@ Upcoming Deadlines: ${JSON.stringify(currentAssignments.map(a => ({ title: a.tit
     }
     console.log("==================================================");
 
-    // 2. Simulate API Call to backend
+    // 2. Call backend FastAPI register endpoint
+    let courseId = `course-${Date.now()}`;
+    const randomColor = COURSE_COLORS[Math.floor(Math.random() * COURSE_COLORS.length)];
+    const syllabusFilename = syllabusFile ? syllabusFile.name : `${newCourseCode.toUpperCase()}_Syllabus.pdf`;
+    
+    let finalCourse = null;
+    let finalAssignments = [];
+
     try {
-      // In a real project, this sends the FormData directly to your server/API
       const response = await fetch(
         '/api/courses/register',
         {
@@ -472,52 +596,121 @@ Upcoming Deadlines: ${JSON.stringify(currentAssignments.map(a => ({ title: a.tit
         }
       );
       
-      const data = await response.json();
-      
-      console.log(data);
-    } catch (err) {
-      console.log("Simulating backend integration: No backend API endpoint active. Processing local simulation...");
+      if (response.ok) {
+        const data = await response.json();
+        console.log("SUCCESS: Backend registration response:", data);
+        
+        const backendCourse = data.course || {};
+        const recList = data.recommendations && data.recommendations.courses;
+        let courseRec = null;
+        if (Array.isArray(recList)) {
+          courseRec = recList.find(r => 
+            r.course_code && (r.course_code.toUpperCase().replace(/[- ]/g, '') === (backendCourse.code || newCourseCode).toUpperCase().replace(/[- ]/g, ''))
+          );
+        }
+        if (!courseRec && recList && recList.length > 0) {
+          courseRec = recList[0];
+        }
+        if (!courseRec && data.recommendations) {
+          courseRec = data.recommendations;
+        }
+
+        finalCourse = {
+          id: courseId,
+          code: (backendCourse.code || newCourseCode).toUpperCase(),
+          name: backendCourse.name || newCourseName,
+          instructor: 'Self-Directed',
+          progress: 0,
+          hoursSpent: parseFloat(newPrevStudyHours) || 0,
+          color: randomColor,
+          topics: (data.syllabus && data.syllabus.topics) || [],
+          recommendation: {
+            recommended_hours: (courseRec && courseRec.recommended_hours) !== undefined ? courseRec.recommended_hours : 'N/A',
+            recommended_topics: (courseRec && courseRec.recommended_topics) || [],
+            reasoning: (courseRec && courseRec.reasoning) || 'No specific backend recommendations.'
+          },
+          syllabusName: syllabusFilename,
+          prevExamScore: parseFloat(newPrevScore) || 0,
+          availableHours: parseInt(backendCourse.availableHours) || parseInt(newAvailableHours) || 4,
+          targetGrade: parseInt(backendCourse.targetGrade) || parseInt(newTargetGrade) || 90,
+          startDate: newStartDate,
+          pastGrades: []
+        };
+
+        const syllabusData = data.syllabus || {};
+        const assignmentList = syllabusData.assignments || [];
+        if (Array.isArray(assignmentList)) {
+          assignmentList.forEach((a, idx) => {
+            finalAssignments.push({
+              id: `assign-${Date.now()}-${idx}-a`,
+              courseId: courseId,
+              title: a.title || a.name || 'Assignment',
+              dueDate: a.due_date || a.dueDate || a.date || newStartDate,
+              type: 'assignment',
+              material: a.material || a.topics || ''
+            });
+          });
+        }
+
+        const examList = syllabusData.exam_dates || syllabusData.exams || [];
+        if (Array.isArray(examList)) {
+          examList.forEach((e, idx) => {
+            finalAssignments.push({
+              id: `assign-${Date.now()}-${idx}-e`,
+              courseId: courseId,
+              title: e.name || e.title || 'Exam',
+              dueDate: e.date || e.due_date || e.dueDate || newStartDate,
+              type: 'exam',
+              material: (e.topics && Array.isArray(e.topics) ? e.topics.join(', ') : '') || e.material || ''
+            });
+          });
+        }
+      }
+      } catch (err) {
+        console.log("Simulating backend integration fallback: FastAPI backend not running.");
+      }
+
+      // Fallback if backend fetch fails or backend is not active
+      if (!finalCourse) {
+        const parsedDeadlines = getSimulatedBackendSyllabusDeadlines(
+          newCourseCode,
+          newStartDate
+        );
+
+        finalCourse = {
+          id: courseId,
+          code: newCourseCode.toUpperCase(),
+          name: newCourseName,
+          instructor: 'Self-Directed',
+          progress: 0,
+          hoursSpent: parseFloat(newPrevStudyHours) || 0,
+          color: randomColor,
+          topics: ['Introduction', 'Core Fundamentals', 'Advanced Applications'],
+          recommendation: {
+            recommended_hours: 4,
+            recommended_topics: ['Syllabus Milestones', 'Target Grade Gap'],
+            reasoning: 'Focus on core topics listed under your syllabus milestones. Close the gap to your target grade by logging regular study focus hours.'
+          },
+          syllabusName: syllabusFilename,
+          prevExamScore: parseFloat(newPrevScore) || 0,
+          availableHours: parseInt(newAvailableHours) || 4,
+          targetGrade: parseInt(newTargetGrade) || 90,
+          startDate: newStartDate,
+          pastGrades: []
+        };
+
+      finalAssignments = parsedDeadlines.map((d, index) => ({
+        id: `assign-${Date.now()}-${index}`,
+        courseId: courseId,
+        title: d.title,
+        dueDate: d.dueDate,
+        type: d.type || 'assignment',
+        material: d.material || ''
+      }));
     }
 
-    // 3. Process local mock states (acting as the backend's completed response)
-    const courseId = `course-${Date.now()}`;
-    const randomColor = COURSE_COLORS[Math.floor(Math.random() * COURSE_COLORS.length)];
-    const syllabusFilename = syllabusFile ? syllabusFile.name : `${newCourseCode.toUpperCase()}_Syllabus.pdf`;
-
-    const parsedDeadlines = getSimulatedBackendSyllabusDeadlines(
-      newCourseCode,
-      newStartDate
-    );
-
-    const newCourse = {
-      id: courseId,
-      code: newCourseCode.toUpperCase(),
-      name: newCourseName,
-      instructor: 'Self-Directed',
-      progress: 0,
-      hoursSpent: parseFloat(newPrevStudyHours) || 0,
-      color: randomColor,
-    
-      recommendation: recommendation,
-    
-      syllabusName: syllabusFilename,
-      prevExamScore: parseFloat(newPrevScore) || 0,
-      availableHours: parseInt(newAvailableHours) || 4,
-      targetGrade: parseInt(newTargetGrade) || 90,
-      startDate: newStartDate
-    };
-
-    const newCourseAssignments = parsedDeadlines.map((d, index) => ({
-      id: `assign-${Date.now()}-${index}`,
-      courseId: courseId,
-      title: d.title,
-      dueDate: d.dueDate,
-      type: d.type || 'assignment',
-      material: d.material || ''
-    }));
-
-    const updatedCourses = [...courses, newCourse];
-    const updatedAssignments = [...assignments, ...newCourseAssignments];
+    const updatedCourses = [...courses, finalCourse];
+    const updatedAssignments = [...assignments, ...finalAssignments];
 
     setCourses(updatedCourses);
     setAssignments(updatedAssignments);
@@ -583,8 +776,15 @@ Upcoming Deadlines: ${JSON.stringify(currentAssignments.map(a => ({ title: a.tit
             </div>
 
             <div className="course-grid">
-              {courses.map((course) => {
-                const pendingCount = assignments.filter(a => a.courseId === course.id).length;
+              {courses.length === 0 ? (
+                <div className="text-center py-8 text-gray-500 text-xs flex flex-col items-center justify-center gap-2" style={{ gridColumn: 'span 2', width: '100%', border: '1px dashed rgba(255,255,255,0.05)', borderRadius: '8px', padding: '20px' }}>
+                  <BookOpen className="w-8 h-8 text-purple-400/50" />
+                  <span className="font-semibold text-gray-300">No registered courses found</span>
+                  <span className="text-[10px] text-gray-500 max-w-[260px] leading-relaxed">Click the "Register Course" button in the top right to start tracking deadlines and study focus hours.</span>
+                </div>
+              ) : (
+                courses.map((course) => {
+                  const pendingCount = assignments.filter(a => a.courseId === course.id).length;
                 return (
                   <div
                     key={course.id}
@@ -645,7 +845,8 @@ Upcoming Deadlines: ${JSON.stringify(currentAssignments.map(a => ({ title: a.tit
                     </div>
                   </div>
                 );
-              })}
+              })
+            )}
             </div>
           </section>
 
@@ -656,7 +857,7 @@ Upcoming Deadlines: ${JSON.stringify(currentAssignments.map(a => ({ title: a.tit
                 <h2>
                   <Sparkles className="w-5 h-5 text-purple-400 animate-pulse" /> AI Study Insights
                 </h2>
-                <div className="ai-tag">Qwen 2.5</div>
+                <div className="ai-tag">GPT-4o-mini</div>
               </div>
 
               <div className="flex items-center gap-3">
@@ -688,13 +889,13 @@ Upcoming Deadlines: ${JSON.stringify(currentAssignments.map(a => ({ title: a.tit
                   <div className="flex flex-col items-center justify-center py-8 text-center">
                     <Sparkles className="w-8 h-8 text-purple-400 mb-2.5 opacity-60 animate-pulse" />
                     <p className="text-[11px] text-gray-400 max-w-[320px] mb-4 leading-relaxed">
-                      Compile your registered course load, weekly target study hours, and current grade averages to generate tailored academic recommendations from Qwen 2.5.
+                      Compile your registered course load, weekly target study hours, and current grade averages to generate tailored academic recommendations from GPT-4o-mini.
                     </p>
                     <button
                       onClick={handleRegenerateSummary}
                       className="btn btn-primary px-5 py-2 text-xs flex items-center gap-2"
                     >
-                      <Sparkles className="w-3.5 h-3.5" /> Generate Qwen Study Insights
+                      <Sparkles className="w-3.5 h-3.5" /> Generate GPT-4o-mini Study Insights
                     </button>
                   </div>
                 )
@@ -874,14 +1075,14 @@ Upcoming Deadlines: ${JSON.stringify(currentAssignments.map(a => ({ title: a.tit
                               onChange={(e) => {
                                 const val = parseFloat(e.target.value);
                                 const nextGrade = isNaN(val) ? 0 : val;
-                                setCourses(prev =>
-                                  prev.map(c =>
-                                    c.id === selectedCourse.id
-                                      ? { ...c, prevExamScore: nextGrade }
-                                      : c
-                                  )
+                                const nextCourses = courses.map(c =>
+                                  c.id === selectedCourse.id
+                                    ? { ...c, prevExamScore: nextGrade }
+                                    : c
                                 );
+                                setCourses(nextCourses);
                                 updateCourseGrade(selectedCourse.id, nextGrade);
+                                refreshCourseRecommendation(selectedCourse.id, nextCourses, assignments);
                               }}
                               className="input-text input-sm font-mono font-bold text-center"
                               style={{ width: '56px' }}

@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import json
 import os
 
-from PDFParser import parse_syllabus
+from pdfParser import parse_syllabus
 from Recommender import generate_recommendations
 
 app = FastAPI()
@@ -16,8 +16,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+import shutil
+
 UPLOAD_DIR = "uploads"
 
+if os.path.exists(UPLOAD_DIR):
+    try:
+        shutil.rmtree(UPLOAD_DIR)
+    except Exception:
+        pass
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 @app.post("/api/courses/register")
@@ -50,12 +57,9 @@ async def register_course(
             "available_hours": availableHours,
             "previous_study_hours": prevStudyHours,
             "previous_exam_scores": [prevExamScore],
-            "topics": syllabus_data["topics"],
-            "exams": syllabus_data["exams"],
-            "assignments": syllabus_data.get(
-                "assignments",
-                []
-            )
+            "topics": syllabus_data.get("topics", []),
+            "exams": syllabus_data.get("exam_dates", syllabus_data.get("exams", [])),
+            "assignments": syllabus_data.get("assignments", [])
         }
         ]
     }
@@ -72,3 +76,8 @@ async def register_course(
     "syllabus": syllabus_data,
     "recommendations": recommendations
 }
+
+@app.post("/api/courses/recommend")
+async def get_course_recommendation(payload: dict):
+    recommendations = generate_recommendations(payload)
+    return {"recommendations": recommendations}

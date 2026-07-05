@@ -86,15 +86,26 @@ Student Data:
 {json.dumps(student_data, indent=2)}
 """
 
-    response = client.responses.create(
+    response = client.chat.completions.create(
         model="gpt-4o-mini",
-        input=prompt
+        messages=[
+            {"role": "user", "content": prompt}
+        ]
     )
 
-    raw_output = response.output_text
+    raw_output = response.choices[0].message.content
+
+    cleaned_output = raw_output.strip()
+    if cleaned_output.startswith("```"):
+        lines = cleaned_output.split("\n")
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines[-1].strip() == "```":
+            lines = lines[:-1]
+        cleaned_output = "\n".join(lines).strip()
 
     try:
-        return json.loads(raw_output)
+        return json.loads(cleaned_output)
 
     except json.JSONDecodeError:
         return {

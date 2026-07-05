@@ -57,15 +57,26 @@ SYLLABUS:
 {pdf_text}
 """
 
-    response = client.responses.create(
-        model="gpt-5",
-        input=prompt
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "user", "content": prompt}
+        ]
     )
 
-    content = response.output_text
+    content = response.choices[0].message.content
+
+    cleaned_content = content.strip()
+    if cleaned_content.startswith("```"):
+        lines = cleaned_content.split("\n")
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines[-1].strip() == "```":
+            lines = lines[:-1]
+        cleaned_content = "\n".join(lines).strip()
 
     try:
-        return json.loads(content)
+        return json.loads(cleaned_content)
     except json.JSONDecodeError:
         return {
             "error": "Model did not return valid JSON",
