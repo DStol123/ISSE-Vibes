@@ -29,6 +29,7 @@ def parse_syllabus(pdf_path: str) -> dict:
 You are an academic planning assistant.
 
 Extract the following information from this syllabus.
+Be as complete as possible, do not exclude any topics listed.
 
 Return ONLY valid JSON.
 
