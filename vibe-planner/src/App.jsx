@@ -26,8 +26,6 @@ function App() {
   // ==========================================================================
   // States
   // ==========================================================================
-  const [courses, setCourses] = useState(INITIAL_COURSES);
-  const [assignments, setAssignments] = useState(INITIAL_ASSIGNMENTS);
   
   // Date states (Default active is July 2026)
   const [currentDate, setCurrentDate] = useState(new Date(2026, 6, 5)); // July 5, 2026
